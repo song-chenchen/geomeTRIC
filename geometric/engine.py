@@ -47,9 +47,9 @@ import re
 import os
 
 from .molecule import Molecule
-from .nifty import bak, eqcgmx, fqcgmx, bohr2ang, logger, getWorkQueue, queue_up_src_dest, rootdir, splitall, copy_tree_over
+from .nifty import bak, au2ev, eqcgmx, fqcgmx, bohr2ang, logger, getWorkQueue, queue_up_src_dest, rootdir, splitall, copy_tree_over
 from .errors import EngineError, CheckCoordError, Psi4EngineError, QChemEngineError, TeraChemEngineError, \
-    ConicalIntersectionEngineError, OpenMMEngineError, GromacsEngineError, MolproEngineError, QCEngineAPIEngineError
+    ConicalIntersectionEngineError, OpenMMEngineError, GromacsEngineError, MolproEngineError, QCEngineAPIEngineError, GaussianEngineError
 
 #=============================#
 #| Useful TeraChem functions |#
@@ -120,12 +120,15 @@ def edit_tcin(fin=None, fout=None, options=None, defaults=None, reqxyz=True, ign
     for k, v in options.items():
         Answer[k] = v
     # Append defaults to the end
+    Answer2 = Answer.copy()
     for k, v in defaults.items():
         if k not in Answer.keys():
-            Answer[k] = v
+            Answer2[k] = v
+    Answer = Answer2.copy()
     for k, v in Answer.items():
         if v is None:
-            del Answer[k]
+            del Answer2[k]
+    Answer = Answer2.copy()
     # Print to the output if provided
     havekeys = []
     if fout is not None:
@@ -191,7 +194,7 @@ class Engine(object):
     # def __deepcopy__(self, memo):
     #     return copy(self)
 
-    def calc(self, coords, dirname, readfiles=False, copydir=None):
+    def calc(self, coords, dirname, read_data=False, copydir=None):
         """
         Top-level method for a single-point calculation. 
         Calculation will be skipped if results are contained in the hash table, 
@@ -204,7 +207,7 @@ class Engine(object):
             1-dimensional array of shape (3*N_atoms) containing atomic coordinates in Bohr
         dirname : str
             Relative path containing calculation files
-        readfiles : bool, default=False
+        read_data : bool, default=False
             If valid calculation output files exist in dirname, read the results instead of
             running a new calculation
         copydir : str, default=None
@@ -228,10 +231,10 @@ class Engine(object):
         if coord_hash in self.stored_calcs:
             result = self.stored_calcs[coord_hash]['result']
         else:
-            # If the readfiles flag is set to True, then attempt to read the
+            # If the read_data flag is set to True, then attempt to read the
             # result from the temp-folder, then skip the calculation if successful.
             read_success = False
-            if readfiles and os.path.exists(dirname) and hasattr(self, 'read_result'):
+            if read_data and os.path.exists(dirname) and hasattr(self, 'read_result'):
                 try:
                     result = self.read_result(dirname, check_coord=coords)
                     read_success = True
@@ -251,7 +254,7 @@ class Engine(object):
     def calc_new(self, coords, dirname):
         raise NotImplementedError("Not implemented for the base class")
 
-    def calc_wq(self, coords, dirname, readfiles=False, copydir=None):
+    def calc_wq(self, coords, dirname, read_data=False, copydir=None):
         """
         Top-level method for submitting a single-point calculation using Work Queue. 
         Different from calc(), this method does not return results, because the control
@@ -268,7 +271,7 @@ class Engine(object):
             1-dimensional array of shape (3*N_atoms) containing atomic coordinates in Bohr
         dirname : str
             Relative path containing calculation files
-        readfiles : bool, default=False
+        read_data : bool, default=False
             If valid calculation output files exist in dirname, read the results instead of
             running a new calculation
         copydir : str, default=None
@@ -280,10 +283,10 @@ class Engine(object):
         if coord_hash in self.stored_calcs:
             return
         else:
-            # If the readfiles flag is set to True, then attempt to read the
+            # If the read_data flag is set to True, then attempt to read the
             # result from the temp-folder, then skip the calculation if successful.
             read_success = False
-            if readfiles and os.path.exists(dirname) and hasattr(self, 'read_result'):
+            if read_data and os.path.exists(dirname) and hasattr(self, 'read_result'):
                 try:
                     result = self.read_result(dirname, check_coord=coords)
                     read_success = True
@@ -337,6 +340,12 @@ class Engine(object):
         logger.warning("copy_scratch not implemented for this engine\n")
         return
 
+    def save_guess_files(self, dirname):
+        return
+
+    def load_guess_files(self, dirname):
+        return
+
 class Blank(Engine):
     """
     Always return zero energy and gradient.
@@ -349,7 +358,7 @@ class Blank(Engine):
         gradient = np.zeros(len(coords), dtype=float)
         return {'energy':energy, 'gradient':gradient}
 
-class TeraChem(Engine):
+class TeraChem(Engine): # pragma: no cover
     """
     Run a TeraChem energy and gradient calculation.
     """
@@ -450,6 +459,8 @@ class TeraChem(Engine):
                 self.tcin['purify'] = 'no'
             if 'mixguess' not in self.tcin: 
                 self.tcin['mixguess'] = "0.0"
+            if self.casscf:
+                self.tcin['scf'] = 'diis'
             self.tcin['casguess' if self.casscf else 'guess'] = ' '.join(orbital_files)
         elif self.initguess_mode != 'none':
             # If scratch files from previous calc do not exist, then copy initial guess files
@@ -460,10 +471,21 @@ class TeraChem(Engine):
                     raise TeraChemEngineError("%s guess file is missing and this code shouldn't be called" % f)
             if self.initguess_mode == 'file':
                 self.tcin['casguess' if self.casscf else 'guess'] = ' '.join(self.initguess_files)
+                if self.casscf: self.tcin['scf'] = 'diis'
             elif self.initguess_mode != 'none':
                 self.tcin['guess'] = ' '.join([self.initguess_mode] + self.initguess_files)
             copied_files = self.initguess_files[:]
         return copied_files
+
+    def save_guess_files(self, dirname):
+        for f in self.orbital_filenames():
+            shutil.copy2(os.path.join(dirname, self.scr, f), os.path.join(dirname, self.scr, f+".sav"))
+        
+    def load_guess_files(self, dirname):
+        for f in self.orbital_filenames():
+            if os.path.exists(os.path.join(dirname, self.scr, f+".sav")):
+                logger.info("Restoring guess file from %s\n" % os.path.join(dirname, self.scr, f+".sav"))
+                shutil.copy2(os.path.join(dirname, self.scr, f+".sav"), os.path.join(dirname, self.scr, f))
 
     def calc_new(self, coords, dirname):
         # Ensure guess files are in the correct locations
@@ -476,8 +498,8 @@ class TeraChem(Engine):
         edit_tcin(fout="%s/run.in" % dirname, options=self.tcin)
         # Back up any existing output files
         # Commented out (should be enabled during debuggin')
-        # bak('run.out', cwd=dirname, start=0)
-        # bak(start_xyz, cwd=dirname, start=0)
+        bak('run.out', cwd=dirname, start=0)
+        bak(start_xyz, cwd=dirname, start=0)
         # Convert coordinates back to the xyz file
         self.M.xyzs[0] = coords.reshape(-1, 3) * bohr2ang
         if self.qmmm:
@@ -523,8 +545,10 @@ class TeraChem(Engine):
         # Specify WQ input and output files
         in_files = [('%s/run.in' % dirname, 'run.in'), ('%s/%s' % (dirname, start_xyz), start_xyz)]
         if self.qmmm:
-            in_files += [(os.path.join(dirname, self.qmindices_name), self.qmindices_name),
-                         (os.path.join(dirname, self.prmtop_name), self.prmtop_name)]
+            qmindices_filename = os.path.split(self.qmindices_name)[1]
+            prmtop_filename = os.path.split(self.prmtop_name)[1]
+            in_files += [("%s/%s" % (dirname, qmindices_filename), qmindices_filename)]
+            in_files += [("%s/%s" % (dirname, prmtop_filename), prmtop_filename)]
         for f in guessfnms:
             in_files.append((os.path.join(dirname, f), f))
         out_files = [('%s/run.out' % dirname, 'run.out')]
@@ -616,7 +640,10 @@ class OpenMM(Engine):
         else:
             logger.info("xml file not in the current folder, treating as a force field XML file and setting up in gas phase.\n")
         if not xmlSystem:
-            forcefield = app.ForceField(xml)
+            try:
+                forcefield = app.ForceField(xml)
+            except ValueError:
+                raise OpenMMEngineError('Provided input file is not an installed force field XML file')
             system = forcefield.createSystem(pdb.topology, nonbondedMethod=app.NoCutoff, constraints=None, rigidWater=False)
         # apply opls combination rule if we are using it
         if self.combination == 'opls':
@@ -683,6 +710,157 @@ class OpenMM(Engine):
     def copy_scratch(self, src, dest):
         return
 
+class Gaussian(Engine):
+    """
+    Run a Gaussian energy and gradient calculation.
+    """
+    def __init__(self, molecule, exe=None, threads=None):
+        super(Gaussian, self).__init__(molecule)
+        self.threads = threads
+        if exe.lower() in ("g16", "g09"):
+            self.gaussian_exe = exe.lower()
+        else:
+            raise ValueError("Only g16 and g09 are supported.")
+
+    def load_gaussian_input(self, gaussian_input):
+        """
+        We can read the .com files using molecule but we can not write them so use the template method.
+
+        Note only Gaussian cartesian coordinates are supported.
+        We also edit the checkpoint file name and change the processors flag if not present.
+
+        Example input file:
+
+        %Mem=6GB
+        %NProcShared=2
+        %Chk=lig
+        # B3LYP/6-31G(d) Force=NoStep
+
+        water energy
+
+        0   1
+        O  -0.464   0.177   0.0
+        H  -0.464   1.137   0.0
+        H   0.441  -0.143   0.0
+
+
+        """
+        reading_molecule, found_geo, found_force = False, False, False
+        gauss_temp = []  # store a template of the input file for generating new ones
+        with open(gaussian_input) as gauss_in:
+            for line in gauss_in:
+                match = re.search(r"^ *[A-Z][a-z]?(.*[-+]?([0-9]*\.)?[0-9]+){3}$", line)
+                if match is not None:
+                    reading_molecule = True
+                    if not found_geo:
+                        found_geo = True
+                        gauss_temp.append("$!geometry@here")
+
+                elif reading_molecule:
+                    if line.strip() == '':
+                        reading_molecule = False
+                        gauss_temp.append(line)
+
+                elif "%nprocshared" in line.lower():
+                    # we should replace the line with our threads value
+                    if self.threads is not None:
+                        gauss_temp.append("%NProcShared=" + str(self.threads) + "\n")
+                    else:
+                        gauss_temp.append(line)
+
+                elif "%chk" in line.lower():
+                    # we should replace it with what we want
+                    gauss_temp.append("%Chk=ligand\n")
+
+                elif line.startswith('#'):
+                    self.route_line = line
+
+                    if "force=nostep" in line.lower():
+                        found_force = True
+                    gauss_temp.append("$!route@here")
+
+                else:
+                    gauss_temp.append(line)
+
+        if not found_force:
+            raise RuntimeError("Gaussian inputfile %s should have force=nostep in route line." % gaussian_input)
+
+        # now we need to make sure the chk point file and threads were set
+        if not any("%chk" in command.lower() for command in gauss_temp):
+            # insert at the top
+            gauss_temp.insert(0, "%Chk=ligand\n")
+        if not any("%nprocshared" in command.lower() for command in gauss_temp):
+            # if threads is not none set it else use 1 thread
+            thread_str = "%NProcShared=" + str(self.threads or 1)
+            gauss_temp.insert(0, thread_str + "\n")
+
+        self.gauss_temp = gauss_temp
+
+    def calc_new(self, coords, dirname):
+        """
+        Run the gaussian single point calculation using the given exe.
+        """
+        if not os.path.exists(dirname): os.makedirs(dirname)
+        # Convert coordinates back to the xyz file
+        self.M.xyzs[0] = coords.reshape(-1, 3) * bohr2ang
+        # Write Gaussian com file
+        with open(os.path.join(dirname, 'gaussian.com'), 'w') as outfile:
+            for line in self.gauss_temp:
+                if line == '$!route@here':
+                    if 'guess' not in self.route_line.lower() and os.path.exists(os.path.join(dirname, 'ligand.chk')):
+                        outfile.write(self.route_line.replace('\n','') + " Guess=Read\n")
+                    else:
+                        outfile.write(self.route_line)
+                elif line == '$!geometry@here':
+                    for i, (e, c) in enumerate(zip(self.M.elem, self.M.xyzs[0])):
+                        outfile.write("%-7s %13.7f %13.7f %13.7f\n" % (e, c[0], c[1], c[2]))
+                else:
+                    outfile.write(line)
+        try:
+            # Run Gaussian
+            subprocess.check_call('%s < gaussian.com > gaussian.log && formchk ligand.chk ligand.fchk > form_log.txt' % self.gaussian_exe, cwd=dirname, shell=True)
+            # Read energy and gradients from Gaussian output
+            result = self.read_result(dirname)
+        except (OSError, IOError, RuntimeError, subprocess.CalledProcessError):
+            raise GaussianEngineError
+        return result
+
+    def read_result(self, dirname, check_coord=None):
+        """
+        Read the result of the output file to get the gradient and energy.
+        """
+        if check_coord is not None:
+            raise CheckCoordError("Coordinate checking not implemented")
+        energy, gradient = None, None
+        # first get the energy from the formatted checkpoint file, works for all methods
+        fchk_out = os.path.join(dirname, "ligand.fchk")
+        with open(fchk_out) as fchk:
+            for line in fchk:
+                if "Total Energy" in line:
+                    energy = float(line.split()[-1])
+                    break
+        # now we get the gradient from the output in Hartrees/Bohr
+        gaussian_out = os.path.join(dirname, 'gaussian.log')
+        with open(gaussian_out) as outfile:
+            found_grad = False
+            for line in outfile:
+                line_strip = line.strip()
+                if " Forces (Hartrees/Bohr)" in line_strip:
+                    found_grad = True
+                    gradient = []
+                elif found_grad:
+                    ls = line_strip.split()
+                    if len(ls) == 5 and ls[0].isdigit() and ls[1].isdigit():
+                        gradient.append([-float(g) for g in ls[2:]])
+                    elif "Cartesian Forces:  Max" in line:
+                        found_grad = False
+        if energy is None:
+            raise RuntimeError("Gaussian energy is not found in %s, please check." % fchk_out)
+        if gradient is None:
+            raise RuntimeError("Gaussian gradient is not found in %s, please check." % gaussian_out)
+        gradient = np.array(gradient, dtype=np.float64).ravel()
+        return {'energy':energy, 'gradient':gradient}
+
 class Psi4(Engine):
     """
     Run a Psi4 energy and gradient calculation.
@@ -708,7 +886,7 @@ class Psi4(Engine):
         coords = []
         elems = []
         fragn = []
-        found_molecule, found_geo, found_gradient = False, False, False
+        found_molecule, found_geo, found_gradient, found_symmetry, found_no_reorient, found_no_com = False, False, False, False, False, False
         psi4_temp = [] # store a template of the input file for generating new ones
         for line in open(psi4in):
             if 'molecule' in line:
@@ -725,10 +903,27 @@ class Psi4(Engine):
                     coords.append(ls[1:4])
                 elif '--' in line:
                     fragn.append(len(elems))
+                elif 'symmetry' in line:
+                    found_symmetry = True
+                    if line.split()[1].lower() != 'c1':
+                        raise Psi4EngineError("Symmetry must be set to c1 to prevent rotations of the coordinate frame.")
+                elif 'no_reorient' in line or 'noreorient' in line:
+                    found_no_reorient = True
+                elif 'no_com' in line or 'nocom' in line:
+                    found_no_com = True
+                elif 'units' in line:
+                    if line.split()[1].lower()[:3] != 'ang':
+                        raise Psi4EngineError("Must use Angstroms as coordinate input.")
                 else:
-                    psi4_temp.append(line)
                     if '}' in line:
                         found_molecule = False
+                        if not found_no_com:
+                            psi4_temp.append("no_com\n")
+                        if not found_no_reorient:
+                            psi4_temp.append("no_reorient\n")
+                        if not found_symmetry:
+                            psi4_temp.append("symmetry c1\n")
+                    psi4_temp.append(line)
             else:
                 psi4_temp.append(line)
             if "gradient(" in line:
@@ -818,8 +1013,13 @@ class Psi4(Engine):
             raise RuntimeError("Psi4 gradient is not found in %s, please check." % psi4out)
         gradient = np.array(gradient, dtype=np.float64).ravel()
         return {'energy':energy, 'gradient':gradient}
+    
+    def copy_scratch(self, src, dest):
+        # Psi4 scratch file handling is complicated and depends on the type of job being run,
+        # so we will opt not to store and retrieve scratch files for now.
+        return
 
-class QChem(Engine):
+class QChem(Engine): # pragma: no cover
     def __init__(self, molecule, dirname=None, qcdir=None, threads=None):
         super(QChem, self).__init__(molecule)
         self.threads = threads
@@ -859,6 +1059,8 @@ class QChem(Engine):
         if self.qcdir and not os.path.exists(os.path.join(dirname, 'run.d')):
             self.qcdir = False
             self.M.edit_qcrems({'scf_guess':None})
+        # If symmetry is enabled by default in Q-Chem, it will mess up finite difference Hessian computations and possibly other things.
+        self.M.edit_qcrems({'symmetry':'off', 'sym_ignore':'true'})
         self.M[0].write(os.path.join(dirname, 'run.in'))
         try:
             # Run Q-Chem
@@ -926,6 +1128,12 @@ class QChem(Engine):
                 s2 = float(line.split()[-1])
         return {'energy':energy, 'gradient':gradient, 's2':s2}
 
+    def copy_scratch(self, src, dest):
+        if not os.path.exists(dest): os.makedirs(dest)
+        if not os.path.exists(os.path.join(src, 'run.d')):
+            raise QChemEngineError("Trying to copy %s but it does not exist" % os.path.join(src, 'run.d'))
+        copy_tree_over(os.path.join(src, 'run.d'), os.path.join(dest, 'run.d'))
+    
 class Gromacs(Engine):
     def __init__(self, molecule):
         super(Gromacs, self).__init__(molecule)
@@ -1133,8 +1341,9 @@ class QCEngineAPI(Engine):
         gradient = np.array(ret["return_result"])
         return {'energy':energy, 'gradient':gradient}
 
-    def calc(self, coords, dirname):
+    def calc(self, coords, dirname, **kwargs):
         # overwrites the calc method of base class to skip caching and creating folders
+        # **kwargs: for throwing away other arguments such as read_data and copyfiles.
         return self.calc_new(coords, dirname)
 
 class ConicalIntersection(Engine):
@@ -1142,49 +1351,79 @@ class ConicalIntersection(Engine):
     Compute conical intersection objective function with penalty constraint.
     Implements the theory from Levine, Coe and Martinez, J. Phys. Chem. B 2008.
     """
-    def __init__(self, molecule, engine1, engine2, sigma, alpha):
-        self.engines = {1: engine1, 2: engine2}
+    def __init__(self, molecule, engines, sigma, alpha):
+        self.engines = deepcopy(engines)
         self.sigma = sigma
         self.alpha = alpha
         super(ConicalIntersection, self).__init__(molecule)
 
     def calc_new(self, coords, dirname):
-        EDict = OrderedDict()
-        GDict = OrderedDict()
-        SDict = OrderedDict()
-        for istate in [1, 2]:
+        n_states = len(self.engines)
+        n_states2 = n_states * (n_states - 1) / 2
+        E_states = []
+        G_states = []
+        S_states = []
+        for istate in range(n_states):
             state_dnm = os.path.join(dirname, 'state_%i' % istate)
             if not os.path.exists(state_dnm): os.makedirs(state_dnm)
             try:
                 spcalc = self.engines[istate].calc(coords, state_dnm)
             except EngineError:
                 raise ConicalIntersectionEngineError
-            EDict[istate] = spcalc['energy']
-            GDict[istate] = spcalc['gradient']
-            SDict[istate] = spcalc.get('s2', 0.0)
-        # Determine the higher energy state
-        if EDict[2] > EDict[1]:
-            I = 2
-            J = 1
-        else:
-            I = 1
-            J = 2
-        # Calculate energy and gradient avg and differences
-        EAvg = 0.5*(EDict[I]+EDict[J])
-        EDif = EDict[I]-EDict[J]
-        GAvg = 0.5*(GDict[I]+GDict[J])
-        GDif = GDict[I]-GDict[J]
-        GAng = np.dot(GDict[I], GDict[J])/(np.linalg.norm(GDict[I])*np.linalg.norm(GDict[J]))
-        # Compute penalty function
-        Penalty = EDif**2 / (EDif + self.alpha)
-        # Compute objective function and gradient
-        Obj = EAvg + self.sigma * Penalty
-        ObjGrad = GAvg + self.sigma * (EDif**2 + 2*self.alpha*EDif)/(EDif+self.alpha)**2 * GDif
-        logger.info("EI= % .8f EJ= % .8f S2I= %.4f S2J= %.4f CosGrad= % .4f <E>= % .8f Gap= %.8f Pen= %.8f Obj= % .8f\n"
-                    % (EDict[I], EDict[J], SDict[I], SDict[J], GAng, EAvg, EDif, Penalty, Obj))
+            E_states.append(spcalc['energy'])
+            G_states.append(spcalc['gradient'])
+            S_states.append(spcalc.get('s2', 0.0))
+        E_states = np.array(E_states)
+        E_order = np.argsort(E_states)
+        EAvg = 0.0
+        GAvg = np.zeros_like(G_states[0])
+        EPen = 0.0
+        GPen = np.zeros_like(G_states[0])
+
+        report_blk1 = []
+        report_blk2 = []
+        report_blk3 = []
+
+        for i in range(n_states):
+            I = E_order[i]
+            EAvg += E_states[I] / n_states
+            GAvg += G_states[I] / n_states
+            atomgrad = np.sqrt(np.sum((G_states[I].reshape(-1,3))**2, axis=1))
+            rms_gradient = np.sqrt(np.mean(atomgrad**2))
+            max_gradient = np.max(atomgrad)
+            report_blk1.append("%5i % 18.10f %7.4f %9.3e %9.3e   " % (I, E_states[I], S_states[I], rms_gradient, max_gradient))
+            report_blk2_str = ""
+            report_blk3_str = ""
+            for j in range(i+1, n_states):
+                J = E_order[j]
+                EDif = E_states[J] - E_states[I]
+                GDif = G_states[J] - G_states[I]
+                EPen += self.sigma * EDif**2 / ((EDif + self.alpha) * n_states2)
+                GPen += self.sigma * (EDif**2 + 2*self.alpha*EDif)/((EDif+self.alpha)**2 * n_states2) * GDif
+                GAng = np.dot(G_states[I], G_states[J])/(np.linalg.norm(G_states[I])*np.linalg.norm(G_states[J]))
+                report_blk2_str += " %8.5f" % (EDif * au2ev)
+                report_blk3_str += " % 8.4f" % GAng
+            report_blk2.append(report_blk2_str)
+            report_blk3.append(report_blk3_str)
+
+        width1 = max([len(line) for line in report_blk1])
+        width2 = max([len(line) for line in report_blk2])
+        width3 = max([len(line) for line in report_blk3])
+
+
+                # logger.info("E[%i]= % .7f E[%i]= % .7f S2[%i]= %.4f S2[%i]= %.4f Gap=%.7f CosGrad= % .4f\n"
+                #             % (I, E_states[I], J, E_states[J], I, S_states[I], J, S_states[J], EDif, GAng))
+
+        Obj = EAvg + EPen
+        ObjGrad = GAvg + GPen
+        
+        logger.info(">>> MECI Report: <E> = % 18.10f Penalty = %15.10f <<<\n" % (EAvg, EPen))
+        logger.info("%5s %18s %7s %9s %9s   %%%is   %%%is\n" % ("State", "Energy (a.u.)", "<S^2>", "G_rms", "G_max", width2, width3) % ("Gaps (eV)", "Cos(^Gi,^Gj)"))
+        for ln in range(len(report_blk1)):
+            logger.info("%%%is%%%is   %%%is\n" % (width1, width2, width3) % (report_blk1[ln], report_blk2[ln], report_blk3[ln]))
         return {'energy':Obj, 'gradient':ObjGrad}
 
     def number_output(self, dirname, calcNum):
-        for istate in [1, 2]:
+        for istate in range(len(self.engines)):
             state_dnm = os.path.join(dirname, 'state_%i' % istate)
             self.engines[istate].number_output(state_dnm, calcNum)

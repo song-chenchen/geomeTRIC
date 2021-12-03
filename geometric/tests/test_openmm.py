@@ -19,7 +19,8 @@ def test_dlc_openmm_water3(localizer):
     Optimize the geometry of three water molecules using standard delocalized internal coordinates.
     The coordinate system will break down and have to be rebuilt.
     """
-    progress = geometric.optimize.run_optimizer(engine='openmm', pdb=os.path.join(datad,'water3.pdb'), coordsys='dlc', input='tip3p.xml')
+    progress = geometric.optimize.run_optimizer(engine='openmm', pdb=os.path.join(datad,'water3.pdb'), coordsys='dlc', input='tip3p.xml',
+                                                converge=['gmax', '1.0e-5'])
     # The results here are in Angstrom
     #
     ref = np.array([[ 1.19172917, -1.71174316,  0.79961878],
@@ -186,5 +187,5 @@ def test_opls_energy(localizer):
                           -4.24613924e-03, -5.87608806e-03,  2.10134309e-03,
                           -9.18018280e-04, -2.62134372e-03,  4.31330813e-04,
                           -1.77472314e-03,  2.30695485e-03,  1.01002642e-03])
-    assert energy == -0.004563862119216744
-    assert grad.all() == opls_grad.all()
+    assert abs(energy - -0.004563862119216744) < 1e-5
+    assert np.allclose(grad, opls_grad, atol=1e-5)

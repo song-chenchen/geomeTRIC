@@ -197,7 +197,7 @@ elif "geometric" in __name__:
     # This ensures logging behavior is consistent with the rest of geomeTRIC
     from .nifty import logger
     package = "geomeTRIC"
-else:
+else: # pragma: no cover
     # Previous default behavior if FB package level loggers could not be imported
     from logging import *
     class RawStreamHandler(StreamHandler):
@@ -370,7 +370,7 @@ elif "geometric" in __name__:
 #===========================#
 
 ## One bohr equals this many angstroms
-bohr2ang = 0.529177210
+bohr2ang     = 0.529177210903      # Previous value: 0.529177210
 
 def unmangle(M1, M2):
     """
@@ -1234,6 +1234,7 @@ class Molecule(object):
                           'in'      : 'qcin',
                           'qcin'    : 'qcin',
                           'com'     : 'gaussian',
+                          'gjf'     : 'gaussian',
                           'rst'     : 'inpcrd',
                           'out'     : 'qcout',
                           'esp'     : 'qcesp',
@@ -1650,7 +1651,7 @@ class Molecule(object):
             selection = list(range(len(self)))
         else:
             selection = list(selection)
-        Answer = self.Write_Tab[self.Funnel[ftype.lower()]](selection,**kwargs)
+        Answer = self.Write_Tab[self.Funnel[ftype.lower()]](selection=selection,**kwargs)
         ## Any method that returns text will give us a list of lines, which we then write to the file.
         if Answer is not None:
             if fnm is None or fnm == sys.stdout:
@@ -1674,9 +1675,15 @@ class Molecule(object):
     #|     For doing useful things       |#
     #=====================================#
 
-    def center_of_mass(self):
-        totMass = sum([PeriodicTable.get(self.elem[i], 0.0) for i in range(self.na)])
-        return np.array([np.sum([xyz[i,:] * PeriodicTable.get(self.elem[i], 0.0) / totMass for i in range(xyz.shape[0])],axis=0) for xyz in self.xyzs])
+    def center_of_mass(self, mass=True):
+        """
+        Calculate the center of mass. If mass=False, then return the geometric center.
+        """
+        if mass:
+            totMass = sum([PeriodicTable.get(self.elem[i], 0.0) for i in range(self.na)])
+            return np.array([np.sum([xyz[i,:] * PeriodicTable.get(self.elem[i], 0.0) / totMass for i in range(xyz.shape[0])],axis=0) for xyz in self.xyzs])
+        else:
+            return np.array([np.mean(self.xyzs[i], axis=0) for i in range(len(self))])
 
     def radius_of_gyration(self):
         totMass = sum([PeriodicTable[self.elem[i]] for i in range(self.na)])
@@ -1687,6 +1694,74 @@ class Molecule(object):
             xyz1 -= coms[i]
             rgs.append(np.sqrt(np.sum([PeriodicTable[self.elem[i]]*np.dot(x,x) for i, x in enumerate(xyz1)])/totMass))
         return np.array(rgs)
+
+    def moment_of_inertia(self, mass=True):
+        """ Calculate moment of inertia in amu * angstrom**2. 
+        If mass = False, then all masses will be set to one."""
+        moments = []
+        for i in range(len(self)):
+            I = np.zeros((3,3))
+            xyz = self.xyzs[i]
+            coms = self.center_of_mass(mass=mass)
+            dxyz = xyz - coms[i, np.newaxis, :]
+            for j, xj in enumerate(dxyz):
+                factor = PeriodicTable[self.elem[j]] if mass else 1.0
+                I += factor*(np.dot(xj,xj)*np.eye(3) - np.outer(xj,xj))
+            moments.append(I)
+        return moments
+        
+    def calc_netforce_torque(self, mass=True):
+        """ Calculate net force and torque vectors
+        in units of hartree/bohr and hartree/bohr*bohr respectively.
+
+        These are actually the "negative" of the net force and torque
+        because the factor of -1 to convert grad into force has not been applied.
+
+        Requires forces to be entered into qm_grads.
+        """
+        netforces = []
+        torques = []
+        coms = self.center_of_mass(mass=mass)
+        if len(self.qm_grads) != len(self):
+            raise RuntimeError('qm_grads length does not match number of structures')
+        if self.qm_grads[0].shape != (self.na, 3):
+            raise RuntimeError('qm_grads element does not have the wrong shape (n_atoms, 3)')
+        for i in range(len(self)):
+            netforces.append(np.sum(self.qm_grads[i], axis=0))
+            torque_vec = np.zeros(3, dtype=float)
+            dxyz = (self.xyzs[i] - coms[i][np.newaxis, :])/bohr2ang
+            for j in range(self.na):
+                torque_vec += np.cross(dxyz[j], self.qm_grads[i][j])
+            torques.append(torque_vec)
+        return np.array(netforces), np.array(torques)
+
+    def remove_netforce_torque(self, mass=True):
+        """ Calculate net force and torque-less analogue of qm_grads. """
+        netforces, torques = self.calc_netforce_torque(mass=mass)
+        coms = self.center_of_mass(mass=mass)
+        moments = self.moment_of_inertia(mass=mass)
+        grad_proj = [frc.copy() for frc in self.qm_grads]
+        for i in range(len(self)):
+            # The purely translational component of the force on each atom
+            trans_frc = netforces[i] / self.na
+            grad_proj[i] -= trans_frc[np.newaxis, :]
+            dxyz = (self.xyzs[i] - coms[i][np.newaxis, :])/bohr2ang
+            # Moment of inertia in amu bohr**2
+            moment_au = moments[i]/bohr2ang**2
+            for j in range(self.na):
+                # The purely rotational component of the force on each atom.
+                # L = angular momentum, I = moment of inertia, w = angular velocity
+                # T = torque, v = perpendicular component of velocity
+                # F = perpendicular component of force, the desired quantity
+                #
+                # Start with F = m (dv/dt) = m (dw/dt x r)
+                # dw/dt = I^-1.dL/dt = I^-1.T
+                # Therefore F = m (I^-1.T) x r
+                I_torque = np.dot(np.linalg.pinv(moment_au), torques[i])
+                factor = PeriodicTable[self.elem[j]] if mass else 1.0
+                torque_frc = factor*np.cross(I_torque, dxyz[j])
+                grad_proj[i][j] -= torque_frc
+        return grad_proj
 
     def rigid_water(self):
         """ If one atom is oxygen and the next two are hydrogen, make the water molecule rigid. """
@@ -2419,15 +2494,16 @@ class Molecule(object):
                 minj = M_rot_C.atomname[minAtoms_C[1]]
                 print("    Closest (Hvy) : rot-frame %i atoms %s-%s %.2f" % (minFrame_C, mini, minj, minDist_C))
             Success = True
-        else:
+        elif printLevel >= 1:
+            print("\n    \x1b[1;91mFailed - clash found. Thresh(H, Hvy) = (%.2f, %.2f)\x1b[0m" % (thresh_hyd, thresh_hvy))
             if haveClash_H:
                 mini = M_rot_H.atomname[minAtoms_H[0]]
                 minj = M_rot_H.atomname[minAtoms_H[1]]
-                if printLevel >= 2: print("    Clash (Hyd) : rot-frame %i atoms %s-%s %.2f" % (minFrame_H, mini, minj, minDist_H))
+                print("    Clash (Hyd) : rot-frame %i atoms %s-%s %.2f" % (minFrame_H, mini, minj, minDist_H))
             if haveClash_C:
                 mini = M_rot_C.atomname[minAtoms_C[0]]
                 minj = M_rot_C.atomname[minAtoms_C[1]]
-                if printLevel >= 2: print("    Clash (Hvy) : rot-frame %i atoms %s-%s %.2f" % (minFrame_C, mini, minj, minDist_C))
+                print("    Clash (Hvy) : rot-frame %i atoms %s-%s %.2f" % (minFrame_C, mini, minj, minDist_C))
         return M_rot_H, Success
 
     def find_angles(self):
@@ -2529,18 +2605,37 @@ class Molecule(object):
             #print phimod
         return phis
 
-    def find_rings(self, max_size=6):
+    def find_rings(self, max_size=12):
         """
-        Return a list of rings in the molecule. Tested on a DNA base
-        pair and C60.  Warning: Using large max_size for rings
-        (e.g. for finding the macrocycle in porphyrin) could lead to
-        some undefined behavior.
+        Return a list of rings in the molecule.
+        
+        Step 1: To find rings we loop through all triples of two atoms
+        bonded to a central one a...b...c and find all shortest
+        paths connecting a...x...y...c excluding atom b. 
+        Therefore, a...b...c...x...y...a forms a ring.
+
+        This set of rings is then reduced to the "complete set of smallest
+        rings" by taking all smallest rings that contain a given bond and
+        taking the union over all bonds in the system. This procedure
+        eliminates fused rings, i.e. rings that can be formed by taking the
+        union of several smaller ones. Note that this is different from the
+        smallest set of smallest rings (SSSR) as it includes a number of
+        linearly dependent rings, but the outcome is unique for a molecule 
+        unlike SSSR.
+
+        Systems that this is tested for include:
+        cholesterol (4 rings)
+        porphin (5 rings including 16-member macrocycle)
+        cubane (6 rings)
+        [4.6.4.6]fenestradiene from Hulot et al, JACS 2008, 130, 5046-5047 (7 rings)
+        vancomycin (12 rings)
+        C60 (32 rings)
 
         Parameters
         ----------
         max_size : int
-            The maximum ring size.  If a large ring contains smaller
-            sub-rings, they are all mapped into one.
+            The maximum ring size.  Decrease to find fewer rings and increase
+            to find larger rings e.g. macrocycles.
 
         Returns
         -------
@@ -2550,12 +2645,8 @@ class Molecule(object):
             from the lowest number and going along the ring, with the
             second atom being the lower of the two possible choices.
         """
-        friends = []
-        for i in range(self.na):
-            friends.append(self.topology.neighbors(i))
-        # Determine if atom is in a ring
-        self.build_topology()
         # Get triplets of atoms that are in rings
+        self.build_topology()
         triplets = []
         for i in range(self.na):
             g = copy.deepcopy(self.topology)
@@ -2571,80 +2662,67 @@ class Molecule(object):
                         triplets.append((a, i, b))
                     else:
                         triplets.append((b, i, a))
-        # Organize triplets into rings
         rings = []
-        # Triplets are assigned to rings
-        assigned = {}
-        # For each triplet that isn't already counted, see if it belongs to a ring already
-        while set(assigned.keys()) != set(triplets):
-            for t in triplets:
-                if t not in assigned:
-                    # print t, "has not been assigned yet"
-                    # Whether this triplet has been assigned to a ring
-                    has_been_assigned = False
-                    # Create variable for new rings
-                    new_rings = copy.deepcopy(rings)
-                    # Assign triplet to a ring
-                    for iring, ring in enumerate(rings):
-                        # Loop over triplets in the ring
-                        for r in ring:
-                            # Two triplets belong to the same ring if two of the atoms
-                            # are the same AND there exists a path connecting them with the
-                            # center atom deleted.  Check the forward and reverse orientations
-                            if ((r[0] == t[1] and r[1] == t[2]) or
-                                (r[::-1][0] == t[1] and r[::-1][1] == t[2]) or
-                                (r[0] == t[::-1][1] and r[1] == t[::-1][2]) or
-                                (r[::-1][0] == t[::-1][1] and r[1] == t[::-1][2])):
-                                ends = list(set(r).symmetric_difference(t))
-                                mids = set(r).intersection(t)
-                                g = copy.deepcopy(self.topology)
-                                for m in mids: g.remove_node(m)
-                                try:
-                                    PathLength = nx.shortest_path_length(g, ends[0], ends[1])
-                                except nx.exception.NetworkXNoPath:
-                                    PathLength = 0
-                                if PathLength <= 0 or PathLength > (max_size-2):
-                                    # print r, t, "share two atoms but are on different rings"
-                                    continue
-                                if has_been_assigned:
-                                    # This happens if two rings have separately been found but they're actually the same
-                                    # print "trying to assign t=", t, "to r=", r, "but it's already in", rings[assigned[t]]
-                                    # print "Merging", rings[iring], "into", rings[assigned[t]]
-                                    for r1 in rings[iring]:
-                                        new_rings[assigned[t]].append(r1)
-                                    del new_rings[new_rings.index(rings[iring])]
-                                    break
-                                new_rings[iring].append(t)
-                                assigned[t] = iring
-                                has_been_assigned = True
-                                # print t, "assigned to ring", iring
-                                break
-                    # If the triplet was not assigned to a ring,
-                    # then create a new one
-                    if not has_been_assigned:
-                        # print t, "creating new ring", len(new_rings)
-                        assigned[t] = len(new_rings)
-                        new_rings.append([t])
-                    # Now the ring has a new triplet assigned to it
-                    rings = copy.deepcopy(new_rings)
-        # Keep the middle atom in each triplet
-        rings = [sorted(list(set([t[1] for t in r]))) for r in rings]
-        # print rings
-        # Sorted rings start from the lowest atom and go around the ring in ascending order
-        sorted_rings = []
-        for ring in rings:
-            # print "Sorting Ring", ring
-            minr = min(ring)
-            ring.remove(minr)
-            sring = [minr]
-            while len(ring) > 0:
-                for r in sorted(ring):
-                    if sring[-1] in friends[r]:
-                        ring.remove(r)
-                        sring.append(r)
-                        break
-            sorted_rings.append(sring[:])
-        return sorted(sorted_rings, key = lambda val: val[0])
+        for i in range(self.na):
+            g = copy.deepcopy(self.topology)
+            n = list(g.neighbors(i))
+            g.remove_node(i)
+            for a, b in itertools.combinations(n, 2):
+                try:
+                    allPaths = list(nx.all_shortest_paths(g, a, b))
+                except nx.exception.NetworkXNoPath: continue
+                for path in allPaths:
+                    if len(path) >= max_size: continue
+                    ringCandidate = [b, i, a] + path[1:-1]
+                    while ringCandidate[0] != min(ringCandidate):
+                        ringCandidate = ringCandidate[1:] + [ringCandidate[0]]
+                    if ringCandidate[1] > ringCandidate[-1]:
+                        ringCandidate = [ringCandidate[0]] + ringCandidate[1:][::-1]
+                    if ringCandidate not in rings:
+                        # print("adding", ringCandidate, "to rings")
+                        rings.append(ringCandidate)
+
+        def in_ring(r, a, b):
+            # Function to see if a pair of atoms is in a ring.
+            if a not in r or b not in r: return False
+            for i in range(len(r)):
+                j = (i+1) % len(r)
+                if (min(r[i], r[j]), max(r[i], r[j])) == (min(a, b), max(a, b)):
+                    return True
+            return False
+                    
+        for r in rings:
+            for i in range(len(r)-1):
+                if r[i] not in self.topology.neighbors(r[(i+1) % len(r)]):
+                    raise RuntimeError("Atoms %i-%i in ring %s are not bonded" % (r[i], r[i+1], str(r)))
+
+        # Each ring must be one of the smallest rings for at least one of its bonds.
+        # Otherwise, it is a fused ring and can be decomposed.
+        keep_rings = []
+        for i, j in self.topology.edges:
+            min_size = 1e10
+            keep_candidates = []
+            for r in range(len(rings)):
+                if in_ring(rings[r], i, j):
+                    keep_candidates.append(r)
+            if len(keep_candidates) == 0: continue
+            if len(keep_candidates) == 1 and r not in keep_rings:
+                keep_rings.append(r)
+                continue
+            min_size = min([len(rings[r]) for r in keep_candidates])
+            for r in keep_candidates:
+                if len(rings[r]) <= min_size and r not in keep_rings:
+                    keep_rings.append(r)
+                        
+        # for r in range(len(rings)):
+        #     if r in keep_rings:
+        #         print("Keeping ring %s" % ' '.join(['%i' % i for i in rings[r]]))
+        # for r in range(len(rings)):
+        #     if r not in keep_rings:
+        #         print("Discarding ring %s because it is a fused ring" % ' '.join(['%i' % i for i in rings[r]]))
+
+        final_rings = [rings[r] for r in keep_rings]
+        return sorted(final_rings, key = lambda val: (val[0], val[1]))
 
     def order_by_connectivity(self, m, i, currList, max_min_path):
         """
@@ -3130,7 +3208,7 @@ class Molecule(object):
 
         return Answer
 
-    def read_dcd(self, fnm, **kwargs):
+    def read_dcd(self, fnm, **kwargs): # pragma: no cover
         xyzs = []
         boxes = []
         if _dcdlib.vmdplugin_init() != 0:
@@ -3180,16 +3258,18 @@ class Molecule(object):
             line = line.strip().expandtabs()
             # Everything after exclamation point is a comment
             sline = line.split('!')[0].split()
-            if len(sline) == 2:
+            if re.match(r"^ *[A-Z][a-z]?(.*[-+]?([0-9]*\.)?[0-9]+){3}$", line) is not None:
+                inxyz = 1
+                if sline[0].capitalize() in PeriodicTable and isfloat(sline[1]) and isfloat(sline[2]) and isfloat(
+                        sline[3]):
+                    elem.append(sline[0])
+                    xyz.append(np.array([float(sline[1]), float(sline[2]), float(sline[3])]))
+
+            elif len(sline) == 2:
                 if isint(sline[0]) and isint(sline[1]):
                     charge = int(sline[0])
                     mult = int(sline[1])
                     title_ln = ln - 2
-            elif len(sline) == 4:
-                inxyz = 1
-                if sline[0].capitalize() in PeriodicTable and isfloat(sline[1]) and isfloat(sline[2]) and isfloat(sline[3]):
-                    elem.append(sline[0])
-                    xyz.append(np.array([float(sline[1]),float(sline[2]),float(sline[3])]))
             elif inxyz:
                 break
             ln += 1
@@ -4055,7 +4135,8 @@ class Molecule(object):
     #|         Writing functions         |#
     #=====================================#
 
-    def write_qcin(self, selection, **kwargs):
+    def write_qcin(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         self.require('qctemplate','qcrems','charge','mult')
         out = []
         if 'read' in kwargs:
@@ -4121,7 +4202,8 @@ class Molecule(object):
                 out.append('')
         return out
 
-    def write_xyz(self, selection, **kwargs):
+    def write_xyz(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         self.require('elem','xyzs')
         out = []
         for I in selection:
@@ -4143,7 +4225,7 @@ class Molecule(object):
                 elist.append(self.elem[i])
         return elist
 
-    def write_lammps_data(self, selection, **kwargs):
+    def write_lammps_data(self, **kwargs):
         """
         Write the first frame of the selection to a LAMMPS data file
         for the purpose of automatically initializing a LAMMPS simulation.
@@ -4152,6 +4234,10 @@ class Molecule(object):
         (1) We are interested in a ReaxFF simulation
         (2) Atom types will be generated from elements
         """
+        selection = kwargs.get('selection', list(range(len(self))))
+        if len(selection) != 1:
+            logger.error("only a single frame can be written for write_lammps_data\n")
+            raise RuntimeError
         I = selection[0]
         out = []
         comm = self.comms[I]
@@ -4215,7 +4301,8 @@ class Molecule(object):
             out.append("%4i 1 %2i 0.0 % 15.10f % 15.10f % 15.10f" % (i+1, list(atmap.keys()).index(self.elem[i])+1, self.xyzs[I][i, 0], self.xyzs[I][i, 1], self.xyzs[I][i, 2]))
         return out
 
-    def write_molproq(self, selection, **kwargs):
+    def write_molproq(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         self.require('xyzs','partial_charge')
         out = []
         for I in selection:
@@ -4227,7 +4314,8 @@ class Molecule(object):
                 out.append("% 15.10f % 15.10f % 15.10f % 15.10f   0" % (xyz[i,0],xyz[i,1],xyz[i,2],self.partial_charge[i]))
         return out
 
-    def write_mdcrd(self, selection, **kwargs):
+    def write_mdcrd(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         self.require('xyzs')
         # In mdcrd files, there is only one comment line
         out = ['mdcrd file generated using %s' % package]
@@ -4238,11 +4326,13 @@ class Molecule(object):
                 out.append(''.join(["%8.3f" % i for i in [self.boxes[I].a, self.boxes[I].b, self.boxes[I].c]]))
         return out
 
-    def write_inpcrd(self, selection, sn=None, **kwargs):
+    def write_inpcrd(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         self.require('xyzs')
-        if len(self.xyzs) != 1 and sn is None:
-            logger.error("inpcrd can only be written for a single-frame trajectory\n")
+        if len(selection) != 1:
+            logger.error("only a single frame can be written for write_inpcrd\n")
             raise RuntimeError
+        sn = selection[0]
         if sn is not None:
             self.xyzs = [self.xyzs[sn]]
             self.comms = [self.comms[sn]]
@@ -4261,7 +4351,8 @@ class Molecule(object):
             out.append(''.join(["%12.7f" % i for i in [self.boxes[0].a, self.boxes[0].b, self.boxes[0].c]]))
         return out
 
-    def write_arc(self, selection, **kwargs):
+    def write_arc(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         self.require('elem','xyzs')
         out = []
         if 'tinkersuf' not in self.Data:
@@ -4276,7 +4367,8 @@ class Molecule(object):
                 out.append("%6i  %s%s" % (i+1,format_xyz_coord(self.elem[i],xyz[i],tinker=True),self.tinkersuf[i] if 'tinkersuf' in self.Data else ''))
         return out
 
-    def write_gro(self, selection, **kwargs):
+    def write_gro(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         out = []
         if sys.stdin.isatty():
             self.require('elem','xyzs')
@@ -4310,7 +4402,8 @@ class Molecule(object):
             out.append(format_gro_box(self.boxes[I]))
         return out
 
-    def write_dcd(self, selection, **kwargs):
+    def write_dcd(self, **kwargs): # pragma: no cover
+        selection = kwargs.get('selection', list(range(len(self))))
         if _dcdlib.vmdplugin_init() != 0:
             logger.error("Unable to init DCD plugin\n")
             raise IOError
@@ -4336,7 +4429,8 @@ class Molecule(object):
         _dcdlib.close_file_write(dcd)
         dcd = None
 
-    def write_pdb(self, selection, **kwargs):
+    def write_pdb(self, **kwargs):
+        selection = kwargs.get('selection', list(range(len(self))))
         standardResidues = ['ALA', 'ASN', 'CYS', 'GLU', 'HIS', 'LEU', 'MET', 'PRO', 'THR', 'TYR', # Standard amino acids
                             'ARG', 'ASP', 'GLN', 'GLY', 'ILE', 'LYS', 'PHE', 'SER', 'TRP', 'VAL', # Standard amino acids
                             'HID', 'HIE', 'HIP', 'ASH', 'GLH', 'TYD', 'CYM', 'CYX', 'LYN', # Some alternate protonation states
@@ -4415,7 +4509,7 @@ class Molecule(object):
             out.append("CRYST1%9.3f%9.3f%9.3f%7.2f%7.2f%7.2f P 1           1 " % (a, b, c, alpha, beta, gamma))
         # Write the structures as models.
         atomIndices = {}
-        for sn in range(len(self)):
+        for sn in selection:
             modelIndex = sn
             if len(self) > 1:
                 out.append("MODEL     %4d" % modelIndex)
@@ -4478,8 +4572,9 @@ class Molecule(object):
             out.append(line)
         return out
 
-    def write_qdata(self, selection, **kwargs):
+    def write_qdata(self, **kwargs):
         """ Text quantum data format. """
+        selection = kwargs.get('selection', list(range(len(self))))
         #self.require('xyzs','qm_energies','qm_grads')
         out = []
         for I in selection:

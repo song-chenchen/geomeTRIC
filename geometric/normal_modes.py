@@ -35,13 +35,14 @@ POSSIBILITY OF SUCH DAMAGE.
 """
 
 from __future__ import division
+from __future__ import print_function
 import os, shutil
 import numpy as np
 from .errors import FrequencyError
 from .molecule import Molecule, PeriodicTable
-from .nifty import logger, kb, kb_si, hbar, au2kj, au2kcal, ang2bohr, bohr2ang, c_lightspeed, avogadro, cm2au, amu2au, ambervel2au, wq_wait, getWorkQueue, commadash
+from .nifty import logger, kb, kb_si, hbar, au2kj, au2kcal, ang2bohr, bohr2ang, c_lightspeed, avogadro, cm2au, amu2au, ambervel2au, wq_wait, getWorkQueue, commadash, bak
 
-def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, verbose=0):
+def calc_cartesian_hessian(coords, molecule, engine, dirname, read_data=True, verbose=0):
     """ 
     Calculate the Cartesian Hessian using finite difference, and/or read data from disk. 
     Data is stored in a folder <prefix>.tmp/hessian, with gradient calculations found in
@@ -57,7 +58,7 @@ def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, ve
         Object containing methods for calculating energy and gradient
     dirname : str
         Directory name for files to be written, i.e. <prefix>.tmp
-    readfiles : bool
+    read_data : bool
         Read Hessian data from disk if valid
         
     Returns
@@ -70,7 +71,7 @@ def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, ve
     # Attempt to read existing Hessian data if it exists.
     hesstxt = os.path.join(dirname, "hessian", "hessian.txt")
     hessxyz = os.path.join(dirname, "hessian", "coords.xyz")
-    if readfiles and os.path.exists(hesstxt) and os.path.exists(hessxyz):
+    if read_data and os.path.exists(hesstxt) and os.path.exists(hessxyz):
         Hx = np.loadtxt(hesstxt)
         if Hx.shape[0] == nc:
             hess_mol = Molecule(hessxyz)
@@ -81,20 +82,20 @@ def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, ve
                 logger.info("Coordinates for Hessian don't match current coordinates, recalculating.\n")
                 bak('hessian.txt', cwd=os.path.join(dirname, "hessian"), start=0)
                 bak('coords.xyz', cwd=os.path.join(dirname, "hessian"), start=0)
-                readfiles=False
+                read_data=False
         else:
             logger.info("Hessian read from file doesn't have the right shape, recalculating.\n")
-            readfiles=False
+            read_data=False
     elif not os.path.exists(hessxyz):
         logger.info("Coordinates for Hessian not found, recalculating.\n")
-        readfiles = False
+        read_data = False
     # Save Hessian to text file
     oldxyz = molecule.xyzs[0].copy()
     molecule.xyzs[0] = coords.reshape(-1, 3)*bohr2ang
     if not os.path.exists(os.path.join(dirname, "hessian")):
         os.makedirs(os.path.join(dirname, "hessian"))
     molecule[0].write(hessxyz)
-    if not readfiles: 
+    if not read_data: 
         if os.path.exists(os.path.join(dirname, "hessian", "displace")):
             shutil.rmtree(os.path.join(dirname, "hessian", "displace"))
     # Calculate Hessian using finite difference
@@ -108,10 +109,10 @@ def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, ve
             if verbose >= 2: logger.info(" Submitting gradient calculation for coordinate %i/%i\n" % (i+1, nc))
             coords[i] += h
             dirname_d = os.path.join(dirname, "hessian/displace/%03ip" % (i+1))
-            engine.calc_wq(coords, dirname_d, readfiles=readfiles, copydir=dirname)
+            engine.calc_wq(coords, dirname_d, read_data=read_data, copydir=dirname)
             coords[i] -= 2*h
             dirname_d = os.path.join(dirname, "hessian/displace/%03im" % (i+1))
-            engine.calc_wq(coords, dirname_d, readfiles=readfiles, copydir=dirname)
+            engine.calc_wq(coords, dirname_d, read_data=read_data, copydir=dirname)
             coords[i] += h
         wq_wait(wq, print_time=600)
         for i in range(nc):
@@ -126,16 +127,16 @@ def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, ve
             Hx[i] = (gfwd-gbak)/(2*h)
     else:
         # First calculate a gradient at the central point, for linking scratch files.
-        engine.calc(coords, dirname, readfiles=readfiles)
+        engine.calc(coords, dirname, read_data=read_data)
         for i in range(nc):
             if verbose >= 2: logger.info(" Running gradient calculation for coordinate %i/%i\n" % (i+1, nc))
             elif verbose >= 1 and (i%5 == 0): logger.info("%i / %i gradient calculations complete\n" % (i*2, nc*2))
             coords[i] += h
             dirname_d = os.path.join(dirname, "hessian/displace/%03ip" % (i+1))
-            gfwd = engine.calc(coords, dirname_d, readfiles=readfiles, copydir=dirname)['gradient']
+            gfwd = engine.calc(coords, dirname_d, read_data=read_data, copydir=dirname)['gradient']
             coords[i] -= 2*h
             dirname_d = os.path.join(dirname, "hessian/displace/%03im" % (i+1))
-            gbak = engine.calc(coords, dirname_d, readfiles=readfiles, copydir=dirname)['gradient']
+            gbak = engine.calc(coords, dirname_d, read_data=read_data, copydir=dirname)['gradient']
             coords[i] += h
             Hx[i] = (gfwd-gbak)/(2*h)
             if verbose == 1 and i == (nc-1) : logger.info("%i / %i gradient calculations complete\n" % (nc*2, nc*2))
@@ -152,7 +153,7 @@ def calc_cartesian_hessian(coords, molecule, engine, dirname, readfiles=True, ve
             shutil.rmtree(os.path.join(dirname, "hessian", "displace"))
     return Hx
 
-def frequency_analysis(coords, Hessian, elem=None, mass=None, energy=0.0, temperature=300.0, pressure=1.0, verbose=0, outfnm=None, note=None, wigner=None):
+def frequency_analysis(coords, Hessian, elem=None, mass=None, energy=0.0, temperature=300.0, pressure=1.0, verbose=0, outfnm=None, note=None, wigner=None, ignore=0):
     """
     Parameters
     ----------
@@ -184,7 +185,9 @@ def frequency_analysis(coords, Hessian, elem=None, mass=None, energy=0.0, temper
         If provided, should be a 2-tuple containing (nSamples, dirname)
         containing the output folder and number of samples and the output folder
         to which samples should be written
-
+    ignore : int
+        Ignore the free energy contributions from the lowest N vibrational modes
+        (including negative force constants if there are any). 
     Returns
     -------
     freqs_wavenumber : np.array
@@ -394,7 +397,7 @@ def frequency_analysis(coords, Hessian, elem=None, mass=None, energy=0.0, temper
     freqs_wavenumber = mwHess_wavenumber * np.sqrt(np.abs(ichess_vals)) * np.sign(ichess_vals)
 
     if verbose:
-        logger.info("Vibrational Frequencies (wavenumber) and Cartesian displacements:\n")
+        logger.info("\n-=# Vibrational Frequencies (wavenumber) and Cartesian displacements #=-\n\n")
         i = 0
         while True:
             j = min(i+3, VibDOF)
@@ -420,7 +423,7 @@ def frequency_analysis(coords, Hessian, elem=None, mass=None, energy=0.0, temper
             i += 3
 
     # Write results to file (can be parsed by ForceBalance)
-    G_tot_au, components, out_lines = free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pressure, verbose)
+    G_tot_au, components, out_lines = free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pressure, verbose, ignore)
     if outfnm:
         write_vdata(freqs_wavenumber, normal_modes_cart, coords, elem, outfnm, out_lines, note=note)
         logger.info("Vibrational analysis written to %s\n" % outfnm)
@@ -434,7 +437,7 @@ def frequency_analysis(coords, Hessian, elem=None, mass=None, energy=0.0, temper
         wigner_sample(coords, mass, elem, freqs_wavenumber, normal_modes, temperature, nSample, dirname, overwrite)
     return freqs_wavenumber, normal_modes_cart, G_tot_au
 
-def free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pressure, verbose = 0):
+def free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pressure, verbose = 0, ignore = 0):
     """
     Calculate Gibbs free energy (i.e. thermochemical analysis) of a system where
     translation / rotation / vibration degrees of freedom are approximated using
@@ -459,6 +462,8 @@ def free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pr
         Pressure (in bar) for which the free energy corrections are to be computed
     verbose : int
         Print debugging info
+    ignore : int
+        Ignore contributions of lowest N vibrational modes to free energy
     """
     # Create a copy of coords and reshape into a 2D array
     coords = coords.copy().reshape(-1, 3)
@@ -527,9 +532,13 @@ def free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pr
     S_vib = 0.0
     nimag = 0
     if verbose >= 1:
-        logger.info("Mode   Freq(1/cm)     Zero-point  +  Thermal = Evib(kcal/mol) Svib(cal/mol/K)\n")
+        logger.info("\nMode   Freq(1/cm)     Zero-point  +  Thermal = Evib(kcal/mol) Svib(cal/mol/K) DG(ZPE+Thermal-TS)\n\n")
     for ifreq, freq in enumerate(freqs_wavenumber):
-        if freq < 0:
+        if ifreq < ignore:
+            e_vib1 = 0.0
+            s_vib1 = 0.0
+            zpve1 = 0.0
+        elif freq < 0:
             nimag += 1
             e_vib1 = 0.0
             s_vib1 = 0.0
@@ -551,7 +560,8 @@ def free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pr
             # F = E - TS -> S = (E-F)/T
             s_vib1 = 1000*(zpve1+e_vib1-f_vib1)/T
         if verbose >= 1:
-            logger.info("%4i   % 10.4f       %8.4f    %8.4f         %8.4f        %8.4f\n" % (ifreq, freq, zpve1, e_vib1, zpve1+e_vib1, s_vib1))
+            logger.info("%4i   % 10.4f       %8.4f    %8.4f         %8.4f        %8.4f        %8.4f\n" % 
+                        (ifreq, freq, zpve1, e_vib1, zpve1+e_vib1, s_vib1, zpve1+e_vib1 - T*s_vib1/1000))
         ZPVE += zpve1
         E_vib += e_vib1
         S_vib += s_vib1
@@ -565,10 +575,12 @@ def free_energy_harmonic(coords, mass, freqs_wavenumber, energy, temperature, pr
     out_lines = ["\n"]
     out_lines.append("== Summary of harmonic free energy analysis ==\n")
     out_lines.append("Note: Rotational symmetry is set to 1 regardless of true symmetry\n")
+    if ignore > 0:
+        out_lines.append("Note: Free energy ignores contributions from %i lowest force constants\n" % ignore)
     if nimag > 0:
         out_lines.append("Note: Free energy does not include contribution from %i imaginary mode(s)\n" % nimag)
     out_lines.append("\n")
-    out_lines.append("Gibbs free energy contributions calculated at @ %.2f K:\n" % T)
+    out_lines.append("Free energy contributions calculated at @ %.2f K:\n" % T)
     out_lines.append("Zero-point vibrational energy:                              %12.4f kcal/mol \n" % ZPVE)
     out_lines.append("H   (Trans + Rot + Vib = Tot): %8.4f + %8.4f + %8.4f = %8.4f kcal/mol \n" % (H_trans, E_rot, E_vib, H_tot))
     out_lines.append("S   (Trans + Rot + Vib = Tot): %8.4f + %8.4f + %8.4f = %8.4f cal/mol/K\n" % (S_trans, S_rot, S_vib, S_tot))
