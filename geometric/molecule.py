@@ -733,7 +733,7 @@ def AlignToDensity(elem,xyz1,xyz2,binary=False):
     xyz2R = np.dot(EulerMatrix(t1[0],t1[1],t1[2]), xyz2.T).T.copy()
     return xyz2R
 
-def AlignToMoments(elem,xyz1,xyz2=None):
+def AlignToMoments(elem,xyz1,xyz2=None,mass=False):
     """Pre-aligns molecules to 'moment of inertia'.
     If xyz2 is passed in, it will assume that xyz1 is already
     aligned to the moment of inertia, and it simply does 180-degree
@@ -741,9 +741,10 @@ def AlignToMoments(elem,xyz1,xyz2=None):
     xyz = xyz1 if xyz2 is None else xyz2
     I = np.zeros((3,3))
     for i, xi in enumerate(xyz):
-        I += (np.dot(xi,xi)*np.eye(3) - np.outer(xi,xi))
-        # This is the original line from MSMBuilder, but we're choosing not to use masses
-        # I += PeriodicTable[elem[i]]*(np.dot(xi,xi)*np.eye(3) - np.outer(xi,xi))
+        if mass:
+            I += PeriodicTable[elem[i]]*(np.dot(xi,xi)*np.eye(3) - np.outer(xi,xi))
+        else:
+            I += (np.dot(xi,xi)*np.eye(3) - np.outer(xi,xi))
     A, B = np.linalg.eig(I)
     # Sort eigenvectors by eigenvalue
     BB   = B[:, np.argsort(A)]
