@@ -51,6 +51,8 @@ from .nifty import bak, au2ev, eqcgmx, fqcgmx, bohr2ang, logger, getWorkQueue, q
 from .errors import EngineError, CheckCoordError, Psi4EngineError, QChemEngineError, TeraChemEngineError, \
     ConicalIntersectionEngineError, OpenMMEngineError, GromacsEngineError, MolproEngineError, QCEngineAPIEngineError, GaussianEngineError
 
+from .xml_helper import read_coors_from_xml, write_coors_to_xml
+
 #=============================#
 #| Useful TeraChem functions |#
 #=============================#
@@ -398,7 +400,7 @@ class TeraChem(Engine): # pragma: no cover
                 raise TeraChemEngineError('%s guess file is missing' % f)
         # Management of QM/MM: Read qmindices and 
         # store locations of prmtop and qmindices files,
-        self.qmmm = 'qmindices' in tcin
+        self.qmmm = 'prmtop' in tcin
         if self.qmmm:
             if not os.path.exists(tcin['coordinates']):
                 raise RuntimeError("TeraChem QM/MM coordinate file does not exist")
@@ -410,6 +412,39 @@ class TeraChem(Engine): # pragma: no cover
             self.prmtop_name = os.path.abspath(tcin['prmtop'])
             self.qmindices = [int(i.split()[0]) for i in open(self.qmindices_name).readlines()]
             self.M_full = Molecule(tcin['coordinates'], ftype='inpcrd', build_topology=False)
+        
+        # Management of QM/MM with openmm XML files
+        self.openmm = 'system_xml' in tcin
+        if self.openmm:
+            print("OpenMM detected")
+            if not os.path.exists(tcin['coordinates']):
+                raise RuntimeError("TeraChem state XML file does not exist")
+            if not os.path.exists(tcin['system_xml']):
+                raise RuntimeError("TeraChem system XML file does not exist")
+            if not os.path.exists(tcin['qmindices']):
+                raise RuntimeError("TeraChem QM/MM qmindices file does not exist")
+            if not os.path.exists(tcin['pdb_template']):
+                raise RuntimeError("pdb_template is required to set up molecule in geometric.")
+            self.qmindices_name = os.path.abspath(tcin['qmindices'])
+            self.systemxml_name = os.path.abspath(tcin['system_xml'])
+            self.grdindices = [int(i.split()[0]) for i in open(self.qmindices_name).readlines()]
+            # test if "mmgrdindices.txt" exists
+        
+            self.mmgrdindices_name = None
+            if "printmmgrad" in tcin:
+                if not os.path.exists(tcin['printmmgrad']):
+                    raise RuntimeError("TeraChem printmmgrad file does not exist")
+                self.mmgrdindices_name = os.path.abspath(tcin['printmmgrad'])
+                mmgrdindices = [int(i.split()[0]) for i in open(self.mmgrdindices_name).readlines()]
+                self.grdindices += mmgrdindices
+                # remove redundant and sort indices 
+                self.grdindices = list(set(self.grdindices))
+            print("grdindices", self.grdindices)
+            # update molecule coordinates from "state.xml"
+            self.M_full = Molecule(tcin['pdb_template'], build_topology=True)
+            self.state_xml = read_coors_from_xml(self.M_full, os.path.abspath(tcin["coordinates"])) 
+            print("finish reading from state_xml")
+
         super(TeraChem, self).__init__(molecule)
 
     def orbital_filenames(self):
@@ -491,7 +526,12 @@ class TeraChem(Engine): # pragma: no cover
         # Ensure guess files are in the correct locations
         self.copy_guess_files(dirname)
         # Set coordinate file name
-        start_xyz = 'start.rst7' if self.qmmm else 'start.xyz'
+        if self.qmmm:
+            start_xyz = 'start.rst7'
+        elif self.openmm:
+            start_xyz = 'start.xml'
+        else:
+            start_xyz = 'start.xyz'
         self.tcin['coordinates'] = start_xyz
         self.tcin['run'] = 'gradient'
         # Write the TeraChem input file
@@ -508,6 +548,14 @@ class TeraChem(Engine): # pragma: no cover
             shutil.copy2(self.prmtop_name, dirname)
             self.M_full.xyzs[0][self.qmindices, :] = self.M.xyzs[0]
             self.M_full[0].write(os.path.join(dirname, start_xyz), ftype='inpcrd')
+        elif self.openmm:
+            # Copy OpenMM Files
+            shutil.copy2(self.qmindices_name, dirname)
+            shutil.copy2(self.systemxml_name, dirname)
+            if self.mmgrdindices_name is not None:
+                shutil.copy2(self.mmgrdindices_name, dirname)
+            self.M_full.xyzs[0][self.grdindices, :] = self.M.xyzs[0]
+            write_coors_to_xml(self.M_full, self.state_xml, os.path.join(dirname, start_xyz)) 
         else:
             self.M[0].write(os.path.join(dirname, start_xyz))
         # Run TeraChem
@@ -525,7 +573,12 @@ class TeraChem(Engine): # pragma: no cover
         # Ensure guess files are in the correct locations
         guessfnms = self.copy_guess_files(dirname)
         # Set coordinate file name
-        start_xyz = 'start.rst7' if self.qmmm else 'start.xyz'
+        if self.qmmm:
+            start_xyz = 'start.rst7'
+        elif self.openmm:
+            start_xyz = 'start.xml'
+        else:
+            start_xyz = 'start.xyz'
         self.tcin['coordinates'] = start_xyz
         self.tcin['run'] = 'gradient'
         # For queueing up jobs, delete GPU key and let the worker decide
@@ -540,6 +593,14 @@ class TeraChem(Engine): # pragma: no cover
             shutil.copy2(self.prmtop_name, dirname)
             self.M_full.xyzs[0][self.qmindices, :] = self.M.xyzs[0]
             self.M_full[0].write(os.path.join(dirname, start_xyz), ftype='inpcrd')
+        elif self.openmm:
+            # Copy OpenMM Files
+            shutil.copy2(self.qmindices_name, dirname)
+            shutil.copy2(self.systemxml_name, dirname)
+            if self.mmgrdindices is not None:
+                shutil.copy2(self.mmgrdindices_name, dirname)
+            self.M_full.xyzs[0][self.grdindices, :] = self.M.xyzs[0]
+            write_coors_to_xml(self.M_full, self.state_xml, os.path.join(dirname, start_xyz)) 
         else:
             self.M[0].write(os.path.join(dirname, start_xyz))
         # Specify WQ input and output files
@@ -549,6 +610,14 @@ class TeraChem(Engine): # pragma: no cover
             prmtop_filename = os.path.split(self.prmtop_name)[1]
             in_files += [("%s/%s" % (dirname, qmindices_filename), qmindices_filename)]
             in_files += [("%s/%s" % (dirname, prmtop_filename), prmtop_filename)]
+        elif self.openmm:
+            qmindices_filename = os.path.split(self.qmindices_name)[1]
+            systemxml_filename = os.path.split(self.systemxml_name)[1]
+            in_files += [("%s/%s" % (dirname, qmindices_filename), qmindices_filename)]
+            in_files += [("%s/%s" % (dirname, systemxml_filename), systemxml_filename)]
+            if self.mmgrdindices_name is not None:
+                mmgrdindices_filename = os.path.split(self.mmgrdindices_name)[1]
+                in_files += [("%s/%s" % (dirname, mmgrdindices_filename), mmgrdindices_filename)]
         for f in guessfnms:
             in_files.append((os.path.join(dirname, f), f))
         out_files = [('%s/run.out' % dirname, 'run.out')]
@@ -567,11 +636,21 @@ class TeraChem(Engine): # pragma: no cover
     def read_result(self, dirname, check_coord=None):
         if check_coord is not None:
             read_xyz_success = False
-            start_xyz = 'start.rst7' if self.qmmm else 'start.xyz'
+            if self.qmmm:
+                start_xyz = 'start.rst7'
+            elif self.openmm:
+                start_xyz = 'start.xml'
+            else:
+                start_xyz = 'start.xyz'
             if os.path.exists(os.path.join(dirname, start_xyz)):
                 try:
                     M = Molecule(os.path.join(dirname, start_xyz))
-                    read_xyz = M.xyzs[0][self.qmindices] if self.qmmm else M.xyzs[0]
+                    if self.qmmm:
+                        read_xyz = M.xyzs[0][self.qmindices] 
+                    elif self.openmm:
+                        read_xyz = M.xyzs[0][self.grdindices]
+                    else: 
+                        read_xyz = M.xyzs[0]
                     read_xyz = read_xyz.flatten() / bohr2ang
                     read_xyz_success = True
                 except: pass
@@ -591,7 +670,12 @@ class TeraChem(Engine): # pragma: no cover
             subprocess.call("awk '/Gradient units are Hartree/,/Net gradient|Point charge part/ {if ($1 ~ /^-?[0-9]/) {print}}' run.out > grad.txt", cwd=dirname, shell=True)
             subprocess.call("awk 'BEGIN {s=0} /SPIN S-SQUARED/ {s=$3} END {printf \"%.6f\\n\", s}' run.out > s-squared.txt", cwd=dirname, shell=True)
             energy = float(open(os.path.join(dirname,'energy.txt')).readlines()[0].strip())
-            na = len(self.qmindices) if self.qmmm else self.M.na
+            if self.qmmm:
+                na = len(self.qmindices)
+            elif self.openmm:
+                na = len(self.grdindices)
+            else:
+                na = self.M.na
             gradient = np.loadtxt(os.path.join(dirname,'grad.txt'))[:na].flatten()
             s2 = float(open(os.path.join(dirname,'s-squared.txt')).readlines()[0].strip())
             assert gradient.shape[0] == self.M.na*3

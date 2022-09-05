@@ -47,6 +47,7 @@ from .rotate import calc_fac_dfac
 from .molecule import Molecule, Elements
 from .nifty import logger, isint, uncommadash, bohr2ang, ang2bohr
 from .rotate import calc_fac_dfac
+from .xml_helper import read_coors_from_xml, write_coors_to_xml
 
 def get_molecule_engine(**kwargs):
     """
@@ -137,7 +138,8 @@ def get_molecule_engine(**kwargs):
             # 2) The geomeTRIC optimizer only "sees" the part of the molecule being optimized.
             # 3) The TeraChem engine writes .rst7 files instead of .xyz files by inserting the
             # optimization coordinates into the correct locations.
-            qmmm = 'qmindices' in tcin
+            qmmm = 'prmtop' in tcin 
+            openmm = 'system_xml' in tcin
             if qmmm:
                 from simtk.openmm.app import AmberPrmtopFile
                 # Need to build a molecule object for the portion of the system being optimized
@@ -159,6 +161,31 @@ def get_molecule_engine(**kwargs):
                 M.top_settings['radii'] = radii
                 M.top_settings['fragment'] = frag
                 M.build_topology()
+            elif openmm:
+                if not os.path.exists(tcin['coordinates']):
+                    raise RuntimeError("TeraChem/OpenMM State XML file does not exist")
+                if not os.path.exists(tcin['system_xml']):
+                    raise RuntimeError("TeraChem/OpenMM System XML file does not exist")
+                if not os.path.exists(tcin['qmindices']):
+                    raise RuntimeError("TeraChem QM/MM qmindices file does not exist")
+                if not os.path.exists(tcin['pdb_template']):
+                    raise RuntimeError("Template PDB file does not exist")
+
+                M_full = Molecule(tcin['pdb_template']) 
+                read_coors_from_xml(M_full, tcin['coordinates']) 
+
+                qmindices_name = tcin['qmindices']
+                grdindices = [int(i.split()[0]) for i in open(qmindices_name).readlines()]
+                if 'printmmgrad' in tcin:
+                    mmgrdindices = [int(i.split()[0]) for i in open(mmgrdindices_name).readlines()]
+                    grdindices += mmgrdindices
+                    # remove redundant and sort indices 
+                    grdindices = list(set(grdindices))
+                print("grdindices", grdindices)
+                M = M_full.atom_select(grdindices)
+                M.top_settings['radii'] = radii
+                M.top_settings['fragment'] = frag
+                M.build_topology()
             elif pdb is not None:
                 M = Molecule(pdb, radii=radii, fragment=frag)
             else:
@@ -169,6 +196,8 @@ def get_molecule_engine(**kwargs):
             M.mult = tcin.get('spinmult',1)
             # The TeraChem engine needs to write rst7 files before calling TC
             # and also make sure the prmtop and qmindices.txt files are present.
+            # DEBUG
+            print("M.na", M.na, M.xyzs[0], M.elem)
             engine = TeraChem(M, tcin, dirname=dirname)
         elif engine_str == 'qchem':
             logger.info("Q-Chem engine selected. Expecting Q-Chem input for gradient calculation.\n")
