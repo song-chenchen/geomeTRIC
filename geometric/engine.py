@@ -439,6 +439,7 @@ class TeraChem(Engine): # pragma: no cover
                 self.grdindices += mmgrdindices
                 # remove redundant and sort indices 
                 self.grdindices = list(set(self.grdindices))
+                self.grdindices.sort()
             print("grdindices", self.grdindices)
             # update molecule coordinates from "state.xml"
             self.M_full = Molecule(tcin['pdb_template'], build_topology=True)

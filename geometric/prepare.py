@@ -177,12 +177,13 @@ def get_molecule_engine(**kwargs):
                 qmindices_name = tcin['qmindices']
                 grdindices = [int(i.split()[0]) for i in open(qmindices_name).readlines()]
                 if 'printmmgrad' in tcin:
-                    mmgrdindices = [int(i.split()[0]) for i in open(mmgrdindices_name).readlines()]
+                    mmgrdindices = [int(i.split()[0]) for i in open(tcin['printmmgrad']).readlines()]
                     grdindices += mmgrdindices
                     # remove redundant and sort indices 
                     grdindices = list(set(grdindices))
-                print("grdindices", grdindices)
+                    grdindices.sort()
                 M = M_full.atom_select(grdindices)
+                M.write("test.xyz")
                 M.top_settings['radii'] = radii
                 M.top_settings['fragment'] = frag
                 M.build_topology()
@@ -196,8 +197,6 @@ def get_molecule_engine(**kwargs):
             M.mult = tcin.get('spinmult',1)
             # The TeraChem engine needs to write rst7 files before calling TC
             # and also make sure the prmtop and qmindices.txt files are present.
-            # DEBUG
-            print("M.na", M.na, M.xyzs[0], M.elem)
             engine = TeraChem(M, tcin, dirname=dirname)
         elif engine_str == 'qchem':
             logger.info("Q-Chem engine selected. Expecting Q-Chem input for gradient calculation.\n")
