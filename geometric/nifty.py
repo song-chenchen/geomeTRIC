@@ -607,6 +607,7 @@ def invert_svd(X,thresh=1e-12):
     v      = np.transpose(vh)
     si     = s.copy()
     for i in range(s.shape[0]):
+        # print("SVD : %i -> %.3e" % (i, s[i]))
         if abs(s[i]) > thresh:
             si[i] = 1./s[i]
         else:
@@ -1055,7 +1056,7 @@ def splitall(path):
     return allparts
 
 # Back up a file.
-def bak(path, dest=None, cwd=None, start=1):
+def bak(path, dest=None, cwd=None, basename=None, start=1):
     oldf = path
     newf = None
     if cwd != None:
@@ -1067,6 +1068,7 @@ def bak(path, dest=None, cwd=None, start=1):
         dnm, fnm = os.path.split(path)
         if dnm == '' : dnm = '.'
         base, ext = os.path.splitext(fnm)
+        if basename: base = basename
         if dest is None:
             dest = dnm
         if not os.path.isdir(dest): os.makedirs(dest)

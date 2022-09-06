@@ -50,8 +50,12 @@ from .molecule import Molecule
 from .nifty import bak, au2ev, eqcgmx, fqcgmx, bohr2ang, logger, getWorkQueue, queue_up_src_dest, rootdir, splitall, copy_tree_over
 from .errors import EngineError, CheckCoordError, Psi4EngineError, QChemEngineError, TeraChemEngineError, \
     ConicalIntersectionEngineError, OpenMMEngineError, GromacsEngineError, MolproEngineError, QCEngineAPIEngineError, GaussianEngineError
-
 from .xml_helper import read_coors_from_xml, write_coors_to_xml
+
+# Strings matching common DFT functionals
+# exclude "pw", "scan" because they might cause false positives
+dft_strings = ["lda", "svwn", "lyp", "b88", "p86", "b97", "hcth", "tpss", "hse", 
+               "hjs", "pbe", "m05", "m06", "m08", "m11", "m12", "m15", "gga"]
 
 #=============================#
 #| Useful TeraChem functions |#
@@ -348,6 +352,9 @@ class Engine(object):
     def load_guess_files(self, dirname):
         return
 
+    def detect_dft(self):
+        return False
+
 class Blank(Engine):
     """
     Always return zero energy and gradient.
@@ -539,8 +546,8 @@ class TeraChem(Engine): # pragma: no cover
         edit_tcin(fout="%s/run.in" % dirname, options=self.tcin)
         # Back up any existing output files
         # Commented out (should be enabled during debuggin')
-        bak('run.out', cwd=dirname, start=0)
-        bak(start_xyz, cwd=dirname, start=0)
+        # bak('run.out', cwd=dirname, start=0)
+        # bak(start_xyz, cwd=dirname, start=0)
         # Convert coordinates back to the xyz file
         self.M.xyzs[0] = coords.reshape(-1, 3) * bohr2ang
         if self.qmmm:
@@ -564,6 +571,16 @@ class TeraChem(Engine): # pragma: no cover
         # Extract energy and gradient
         result = self.read_result(dirname)
         return result
+
+    def calc_bondorder(self, coords, dirname):
+        self.tcin['bond_order_mat'] = 'yes'
+        self.calc_new(coords, dirname)
+        bo_mat = []
+        for ln, line in enumerate(open(os.path.join(dirname, self.scr, 'bond_order.mat')).readlines()):
+            if ln >= 2:
+                bo_mat.append([float(i) for i in line.split()[1:]])
+        del self.tcin['bond_order_mat']
+        return np.array(bo_mat)
 
     def calc_wq_new(self, coords, dirname):
         # Set up Work Queue object
@@ -692,6 +709,12 @@ class TeraChem(Engine): # pragma: no cover
             raise TeraChemEngineError("Trying to copy %s but it does not exist" % os.path.join(src, self.scr))
         copy_tree_over(os.path.join(src, self.scr), os.path.join(dest, self.scr))
 
+    def detect_dft(self):
+        for i in dft_strings:
+            if i.lower() in self.tcin['method'].lower():
+                return True
+        return False
+
 class OpenMM(Engine):
     """
     Run a OpenMM energy and gradient calculation.
@@ -704,16 +727,16 @@ class OpenMM(Engine):
         except ImportError:
             raise ImportError("OpenMM computation object requires the 'simtk' package. Please pip or conda install 'openmm' from omnia channel.")
         pdb = app.PDBFile(pdb)
+        modeller = app.Modeller(pdb.topology, pdb.positions)
         xmlSystem = False
         self.combination = None
+        self.n_virtual_sites = 0
         if os.path.exists(xml):
             xmlStr = open(xml).read()
             # check if we have opls combination rules if the xml is present
             try:
                 self.combination = ET.fromstring(xmlStr).find('NonbondedForce').attrib['combination']
-            except AttributeError:
-                pass
-            except KeyError:
+            except (AttributeError, KeyError):
                 pass
             try:
                 # If the user has provided an OpenMM system, we can use it directly
@@ -729,13 +752,18 @@ class OpenMM(Engine):
                 forcefield = app.ForceField(xml)
             except ValueError:
                 raise OpenMMEngineError('Provided input file is not an installed force field XML file')
-            system = forcefield.createSystem(pdb.topology, nonbondedMethod=app.NoCutoff, constraints=None, rigidWater=False)
+            try:
+                system = forcefield.createSystem(modeller.topology, nonbondedMethod=app.NoCutoff, constraints=None, rigidWater=False)
+            except ValueError:
+                modeller.addExtraParticles(forcefield)
+                system = forcefield.createSystem(modeller.topology, nonbondedMethod=app.NoCutoff, constraints=None, rigidWater=False)
         # apply opls combination rule if we are using it
         if self.combination == 'opls':
             logger.info("\nUsing geometric combination rules\n")
             system = self.opls(system)
         integrator = mm.VerletIntegrator(1.0*u.femtoseconds)
         platform = mm.Platform.getPlatformByName('Reference')
+        self.n_virtual_sites = sum([system.isVirtualSite(particle) for particle in range(system.getNumParticles())])
         self.simulation = app.Simulation(pdb.topology, system, integrator, platform)
         super(OpenMM, self).__init__(molecule)
 
@@ -744,14 +772,20 @@ class OpenMM(Engine):
         import simtk.unit as u
         try:
             self.M.xyzs[0] = coords.reshape(-1, 3) * bohr2ang
-            pos = [Vec3(self.M.xyzs[0][i,0]/10, self.M.xyzs[0][i,1]/10, self.M.xyzs[0][i,2]/10) for i in range(self.M.na)]*u.nanometer
+            pos = [Vec3(self.M.xyzs[0][i, 0]/10, self.M.xyzs[0][i, 1]/10, self.M.xyzs[0][i, 2]/10) for i in range(self.M.na)]*u.nanometer
+            for _ in range(self.n_virtual_sites):
+                pos.extend([Vec3(0, 0, 0)]*u.nanometer)
             self.simulation.context.setPositions(pos)
+            if self.n_virtual_sites:
+                self.simulation.context.computeVirtualSites()
             state = self.simulation.context.getState(getEnergy=True, getForces=True)
             energy = state.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole) / eqcgmx
             gradient = state.getForces(asNumpy=True).flatten() / fqcgmx
+            if self.n_virtual_sites:
+                gradient = gradient[:-self.n_virtual_sites*3]
         except:
             raise OpenMMEngineError
-        return {'energy':energy, 'gradient':gradient}
+        return {'energy': energy, 'gradient': gradient}
 
     @staticmethod
     def opls(system):
@@ -946,6 +980,12 @@ class Gaussian(Engine):
         gradient = np.array(gradient, dtype=np.float64).ravel()
         return {'energy':energy, 'gradient':gradient}
 
+    def detect_dft(self):
+        for i in dft_strings:
+            if i.lower() in self.route_line.lower():
+                return True
+        return False
+
 class Psi4(Engine):
     """
     Run a Psi4 energy and gradient calculation.
@@ -1104,6 +1144,14 @@ class Psi4(Engine):
         # so we will opt not to store and retrieve scratch files for now.
         return
 
+    def detect_dft(self):
+        for line in self.psi4_temp:
+            if "gradient(" in line:
+                for i in dft_strings:
+                    if i.lower() in line.lower():
+                        return True
+        return False
+
 class QChem(Engine): # pragma: no cover
     def __init__(self, molecule, dirname=None, qcdir=None, threads=None):
         super(QChem, self).__init__(molecule)
@@ -1150,9 +1198,9 @@ class QChem(Engine): # pragma: no cover
         try:
             # Run Q-Chem
             if self.qcdir:
-                subprocess.check_call('qchem%s -save run.in run.out run.d > run.log 2>&1' % self.nt(), cwd=dirname, shell=True)
+                subprocess.check_call('qchem%s run.in run.out run.d > run.log 2>&1' % self.nt(), cwd=dirname, shell=True)
             else:
-                subprocess.check_call('qchem%s -save run.in run.out run.d > run.log 2>&1' % self.nt(), cwd=dirname, shell=True)
+                subprocess.check_call('qchem%s run.in run.out run.d > run.log 2>&1' % self.nt(), cwd=dirname, shell=True)
                 # Assume reading the SCF guess is desirable
                 self.qcdir = True
                 self.M.edit_qcrems({'scf_guess':'read'})
@@ -1160,6 +1208,20 @@ class QChem(Engine): # pragma: no cover
         except (OSError, IOError, RuntimeError, subprocess.CalledProcessError):
             raise QChemEngineError
         return result
+
+    def calc_bondorder(self, coords, dirname):
+        # Make a copy of the 'unmodified' molecule object
+        M_bak = deepcopy(self.M)
+        # Set scf_final_print 1 to get the Mayer bond order
+        self.M.edit_qcrems({'scf_final_print':'1'})
+        # Actually run the Q-Chem calculation
+        self.calc_new(coords, dirname)
+        # Read the bond order from the Q-Chem output file
+        M_qcout = Molecule(os.path.join(dirname, 'run.out'), build_topology=False)
+        # Restore the 'old' molecule object
+        self.M = M_bak
+        # Return the Mayer bond order as a matrix
+        return M_qcout.qm_bondorder[-1]
 
     def calc_wq_new(self, coords, dirname):
         wq = getWorkQueue()
@@ -1184,31 +1246,21 @@ class QChem(Engine): # pragma: no cover
             read_xyz_success = False
             if os.path.exists('%s/run.out' % dirname): 
                 try:
-                    M1 = Molecule('%s/run.out' % dirname)
+                    M1 = Molecule('%s/run.out' % dirname, build_topology=False)
                     read_xyz = M1.xyzs[0].flatten() / bohr2ang
                     read_xyz_success = True
                 except: pass
             if not read_xyz_success or np.linalg.norm(check_coord - read_xyz) > 1e-8:
                 raise CheckCoordError
-        M1 = Molecule('%s/run.out' % dirname)
+        M1 = Molecule('%s/run.out' % dirname, build_topology=False)
         # In the case of multi-stage jobs, the last energy and gradient is what we want.
         energy = M1.qm_energies[-1]
-        # gradient = M1.qm_grads[-1].flatten()
-        # Parse gradient from GRAD file for improved precision.
-        gradient = []
-        gradmode = 0
-        for line in open('%s/run.d/GRAD' % dirname).readlines():
-            if line.strip().startswith('$gradient'):
-                gradmode = 1
-            elif line.startswith('$'):
-                gradmode = 0
-            elif gradmode:
-                s = line.split()
-                gradient.append([float(i) for i in s])
-        gradient = np.array(gradient).flatten()
+        # Parse gradient from Q-Chem binary file. (Written by default without -save)
+        gradient = np.fromfile('%s/run.d/131.0' % dirname)
         # Assume that the last occurence of "S^2" is what we want.
         s2 = 0.0
-        for line in open('%s/run.out' % dirname):
+        # The 'iso-8859-1' prevents some strange errors that show up when reading the Archival summary line
+        for line in open('%s/run.out' % dirname, encoding='iso-8859-1'):
             if "<S^2>" in line:
                 s2 = float(line.split()[-1])
         return {'energy':energy, 'gradient':gradient, 's2':s2}
@@ -1218,6 +1270,14 @@ class QChem(Engine): # pragma: no cover
         if not os.path.exists(os.path.join(src, 'run.d')):
             raise QChemEngineError("Trying to copy %s but it does not exist" % os.path.join(src, 'run.d'))
         copy_tree_over(os.path.join(src, 'run.d'), os.path.join(dest, 'run.d'))
+
+    def detect_dft(self):
+        for qcrem in self.M.qcrems:
+            for key, val in qcrem.items():
+                if key.lower() in ['method', 'exchange', 'correlation']:
+                    if any([i.lower() in val.lower() for i in dft_strings]):
+                        return True
+        return False
     
 class Gromacs(Engine):
     def __init__(self, molecule):
@@ -1384,6 +1444,13 @@ class Molpro(Engine):
         gradient = np.array(gradient, dtype=np.float64).ravel()
         return {'energy':energy, 'gradient':gradient}
 
+    def detect_dft(self):
+        for line in self.molpro_temp:
+            for keyword in ["ks,", "ks;", "ks}"]:
+                if keyword in line.lower() or line.lower().strip().endswith("ks"):
+                    return True
+        return False
+
 class QCEngineAPI(Engine):
     def __init__(self, schema, program):
         try:
@@ -1430,6 +1497,9 @@ class QCEngineAPI(Engine):
         # overwrites the calc method of base class to skip caching and creating folders
         # **kwargs: for throwing away other arguments such as read_data and copyfiles.
         return self.calc_new(coords, dirname)
+
+    def detect_dft(self):
+        return any([i.lower() in self.schema["model"]["method"].lower() for i in dft_strings])
 
 class ConicalIntersection(Engine):
     """
@@ -1512,3 +1582,10 @@ class ConicalIntersection(Engine):
         for istate in range(len(self.engines)):
             state_dnm = os.path.join(dirname, 'state_%i' % istate)
             self.engines[istate].number_output(state_dnm, calcNum)
+
+    def detect_dft(self):
+        for istate in range(len(self.engines)):
+            if self.engines[istate].detect_dft():
+                return True
+        else:
+            return False

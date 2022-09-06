@@ -66,16 +66,20 @@ class OptParams(object):
         # Maximum value of trust radius
         self.tmax = kwargs.get('tmax', 0.03 if self.transition else 0.3)
         # Minimum value of the trust radius
-        self.tmin = kwargs.get('tmin', min(1e-4 if (self.transition or self.meci) else 1.2e-3, self.Convergence_drms))
+        # Also sets the maximum step size that can be rejected
+        # LPW: Add to documentation later:
+        # This parameter is complicated.  It represents the length scale below which the PES is expected to be smooth.
+        # If set too small, the trust radius can decrease without limit and make the optimization impossible.
+        # This could happen for example if the potential energy surface contains a "step", which occurs infrequently;
+        # we don't want the optimization to stop there completely, but rather we accept a bad step and keep going.
+        # If set too large, then the rejection algorithm becomes ineffective as too-large low-quality steps will be kept.
+        # It should also not be smaller than 2*Convergence_drms because that could artifically cause convergence.
+        # Because MECI optimizations have more "sharpness" in their PES, it is set
+        # PS: If the PES is inherently rough on extremely small length scales,
+        # then the optimization is not expected to converge regardless of tmin.
+        self.tmin = kwargs.get('tmin', min(1.0e-4 if (self.meci or self.transition) else 1.2e-3, self.Convergence_drms))
         # Use maximum component instead of RMS displacement when applying trust radius.
         self.usedmax = kwargs.get('usedmax', False)
-        # Minimum size of a step that can be rejected
-        # self.thre_rj = kwargs.get('thre_rj', 1e-4 if (self.transition or self.meci) else 1e-2)
-        self.thre_rj = kwargs.get('thre_rj', min(self.tmin, 1e-4) if (self.transition or self.meci) else self.tmin)
-        # Prevents infinite loop where step is rejected, trust radius stays the same, and an identical step is taken.
-        if self.tmin > self.thre_rj:
-            logger.info("Setting minimum trust radius to %.1e (= thre_rj)")
-            self.tmin = self.thre_rj
         # Sanity checks on trust radius
         if self.tmax < self.tmin:
             raise ParamError("Max trust radius must be larger than min")
@@ -94,6 +98,9 @@ class OptParams(object):
         # Name of the qdata.txt file to be written.
         # The CLI is designed so the user passes true/false instead of the file name.
         self.qdata = 'qdata.txt' if kwargs.get('qdata', False) else None
+        # Bond order threshold parameter, when using bond orders to build bonds.
+        # Turned on by default for TS calculations; with sufficient testing could turn on for minimization.
+        self.bothre = kwargs.get('bothre', 0.6 if self.transition else 0.0)
         # Whether to calculate or read a Hessian matrix.
         self.hessian = kwargs.get('hessian', None)
         if self.hessian is None:
@@ -176,6 +183,8 @@ class OptParams(object):
         # Convergence criteria that are only used if molconv is set to True
         self.Convergence_molpro_gmax = kwargs.get('convergence_molpro_gmax', 3e-4)
         self.Convergence_molpro_dmax = kwargs.get('convergence_molpro_dmax', 1.2e-3)
+        # Convergence criteria for constraint violation
+        self.Convergence_cmax = kwargs.get('convergence_cmax', 1.0e-2)
 
     def printInfo(self):
         if self.subfrctor == 2:
@@ -194,7 +203,6 @@ class OptParams(object):
             logger.info(' Hessian will be computed for both first and last step.\n')
         elif self.hessian.startswith('file:'):
             logger.info(' Hessian data will be read from file: %s\n' % self.hessian[5:])
-        logger.info("Lower bound for rejected steps = %.2e\n" % self.thre_rj)
 
 def str2bool(v):
     """ Allows command line options such as "yes" and "True" to be converted into Booleans. """
@@ -302,7 +310,7 @@ def parse_optimizer_args(*args):
                               'and/or set specific criteria using key/value pairs e.g. "energy 1e-5 grms 1e-3"\n ')
     grp_optparam.add_argument('--trust', type=float, help='Starting trust radius, defaults to 0.1 (energy minimization) or 0.01 (TS optimization).\n ')
     grp_optparam.add_argument('--tmax', type=float, help='Maximum trust radius, defaults to 0.3 (energy minimization) or 0.03 (TS optimization).\n ')
-    grp_optparam.add_argument('--thre_rj', type=float, help='Do not reject steps when the trust radius is below this threshold (method-dependent).\n ')
+    grp_optparam.add_argument('--tmin', type=float, help='Minimum trust radius, do not reject steps trust radius is below this threshold (method-dependent).\n ')
     grp_optparam.add_argument('--usedmax', type=str2bool, help='Use maximum component instead of RMS displacement when applying trust radius.\n ')
     grp_optparam.add_argument('--enforce', type=float, help='Enforce exact constraints when within provided tolerance (in a.u./radian, default 0.0)\n ')
     grp_optparam.add_argument('--conmethod', type=int, help='Set to 1 to enable updated constraint algorithm (default 0).\n ')
@@ -320,6 +328,7 @@ def parse_optimizer_args(*args):
     grp_modify.add_argument('--coords', type=str, help='Coordinate file to override the QM input file / PDB file. The LAST frame will be used.\n ')
     grp_modify.add_argument('--frag', type=str2bool, help='Provide "yes" to delete bonds between residues, producing\n'
                             'separate fragments in the internal coordinate system.')
+    grp_modify.add_argument('--bothre', type=float, help='Set the bond order threshold for building bonds in transition state calculations (Q-Chem, TeraChem only). Set 0.0 to disable.\n ')
     
     grp_output = parser.add_argument_group('output', 'Control the format and amount of the output')
     grp_output.add_argument('--prefix', type=str, help='Specify a prefix for log file and temporary directory.\n'

@@ -8,7 +8,9 @@ You can install `geomeTRIC` with ``conda``, with ``pip``, or by installing from 
 Conda
 -----
 
-You can install or update geomeTRIC using the ``conda`` package manager.::
+You can install or update geomeTRIC using the ``conda`` package manager.
+
+.. parsed-literal::
 
     conda install geometric -c conda-forge
 
@@ -54,6 +56,7 @@ Supported QM packages are as follows. Older versions of packages may work, no gu
 * Gaussian : Version 09 or 16
   
 Supported MM packages are:
+
 * OpenMM : Version 6.3 or above
 * Gromacs : Version 4.6.7 or 5.1.4. Newer versions are not tested.
 
@@ -75,8 +78,11 @@ Test geomeTRIC with ``pytest``::
 
 More information is available in the developer documentation.
 
+.. _installcctools:
+
 Installation of cctools
-------------------------
+-----------------------
+
 The Work Queue library in the `CCTools <https://github.com/cooperative-computing-lab/cctools>`_ package is utilized to provide distributed computing features in geomeTRIC, primarily the computation of numerical Hessian matrices.
 
 Installation of ``cctools`` is done separately. A convenient bash script has been made to simplify the process::
